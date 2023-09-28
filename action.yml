@@ -56,6 +56,12 @@ inputs:
   lfs:
     description: "Enable Git LFS support."
     default: false
+  list_only:
+    description: "Show list of repositories to be synced only and exit."
+    default: false
+outputs:
+  repo_list:
+    description: "A list of the repositories to sync when run with list_only."
 runs:
   using: "docker"
   image: "Dockerfile"
@@ -77,3 +83,4 @@ runs:
     - ${{ inputs.timeout}}
     - ${{ inputs.mappings}}
     - ${{ inputs.lfs }}
+    - ${{ inputs.list_only }}
