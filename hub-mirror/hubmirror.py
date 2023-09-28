@@ -64,7 +64,15 @@ class HubMirror(object):
 
         # Using static list when static_list is set
         repos = self.static_list
+        if repos:
+            print("Using static list instead of dynamic")
         src_repos = repos if repos else hub.dynamic_list()
+
+        if self.args.list_only:
+            repo_list = ','.join(src_repos)
+            with open('repo_list.txt', 'w', encoding="utf-8") as text_file:
+                text_file.write("%s" % repo_list)
+            sys.exit(0)
 
         total, success, skip = len(src_repos), 0, 0
         failed_list = []
