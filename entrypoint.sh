@@ -31,7 +31,12 @@ python3 /hub-mirror/hubmirror.py --src "${INPUT_SRC}" --dst "${INPUT_DST}" \
 --timeout  "${INPUT_TIMEOUT}" \
 --api-timeout "${INPUT_API_TIMEOUT}" \
 --mappings  "${INPUT_MAPPINGS}" \
---lfs "${INPUT_LFS}"
+--lfs "${INPUT_LFS}" \
+--list-only "${INPUT_LIST_ONLY}"
+
+ret=$?
+
+[ -f repo_list.txt ] && echo "repo_list=$(cat repo_list.txt)" >> $GITHUB_OUTPUT
 
 # Skip original code
-exit $?
+exit $ret
