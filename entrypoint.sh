@@ -32,7 +32,9 @@ python3 /hub-mirror/hubmirror.py --src "${INPUT_SRC}" --dst "${INPUT_DST}" \
 --api-timeout "${INPUT_API_TIMEOUT}" \
 --mappings  "${INPUT_MAPPINGS}" \
 --lfs "${INPUT_LFS}" \
---list-only "${INPUT_LIST_ONLY}"
+--list-only "${INPUT_LIST_ONLY}" \
+--branch "${INPUT_BRANCH}" \
+--shallow-clone "${INPUT_SHALLOW_CLONE}"
 
 ret=$?
 

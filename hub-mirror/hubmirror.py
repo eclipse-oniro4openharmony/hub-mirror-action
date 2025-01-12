@@ -91,7 +91,9 @@ class HubMirror(object):
                         lfs=(
                             self.args.lfs if hasattr(self.args, "lfs")
                             else False
-                        )
+                        ),
+                        branch=self.args.branch,
+                        shallow_clone=self.args.shallow_clone
                     )
                     mirror.download()
                     mirror.create()
