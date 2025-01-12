@@ -11,7 +11,8 @@ from utils import cov2sec
 class Mirror(object):
     def __init__(
         self, hub, src_name, dst_name,
-        cache='.', timeout='0', force_update=False, lfs=False
+        cache='.', timeout='0', force_update=False, lfs=False,
+        branch=None, shallow_clone=False
     ):
         self.hub = hub
         self.src_name = src_name
@@ -19,6 +20,8 @@ class Mirror(object):
         self.src_url = hub.src_repo_base + '/' + src_name + ".git"
         self.dst_url = hub.dst_repo_base + '/' + dst_name + ".git"
         self.repo_path = cache + '/' + src_name
+        self.branch = branch
+        self.shallow_clone = shallow_clone
         if re.match(r"^\d+[dhms]?$", timeout):
             self.timeout = cov2sec(timeout)
         else:
@@ -31,11 +34,37 @@ class Mirror(object):
         # TODO: process empty repo
         print("Starting git clone " + self.src_url)
         mygit = git.cmd.Git(os.getcwd())
-        mygit.clone(
-            git.cmd.Git.polish_url(self.src_url), self.repo_path,
-            kill_after_timeout=self.timeout
-        )
+
+        clone_args = [git.cmd.Git.polish_url(self.src_url), self.repo_path]
+
+        # Add branch and shallow clone options if specified
+        if self.branch:
+            clone_args.extend(["--branch", self.branch])
+        if self.shallow_clone:
+            clone_args.extend(["--depth", "1"])
+
+        mygit.clone(*clone_args, kill_after_timeout=self.timeout)
         local_repo = git.Repo(self.repo_path)
+
+        if self.shallow_clone:
+            # Amend the last commit
+            head_commit = local_repo.head.commit
+
+            # Create a new commit with the same tree and message as the old one
+            local_repo.index.write()  # Ensure the index is written
+            new_commit = local_repo.index.commit(
+                head_commit.message,  # Use the same commit message
+                author=head_commit.author,
+                committer=head_commit.committer,
+                parent_commits=[],  # This makes it an initial commit
+                skip_hooks=True  # Skip pre-commit and post-commit hooks
+            )
+
+            # Force the HEAD reference to point to the new commit
+            local_repo.head.reference.set_commit(new_commit)
+            local_repo.head.reset(index=True, working_tree=True)
+            print(f"Amended commit: {new_commit.hexsha}")
+
         if self.lfs:
             local_repo.git.lfs("fetch", "--all", "origin")
         print("Clone completed: %s" % (os.getcwd() + self.repo_path))
@@ -90,10 +119,15 @@ class Mirror(object):
                 self.hub.dst_type, self.dst_url))
             local_repo.delete_remote(self.hub.dst_type)
             local_repo.create_remote(self.hub.dst_type, self.dst_url)
-        cmd = [
+        if self.branch:
+            cmd = [
+            self.hub.dst_type, f'{self.branch}'
+            ]
+        else:
+            cmd = [
             self.hub.dst_type, 'refs/remotes/origin/*:refs/heads/*',
             '--tags', '--prune'
-        ]
+            ]
         if not self.force_update:
             print("(3/3) Pushing...")
             local_repo.git.push(*cmd, kill_after_timeout=self.timeout)
