@@ -46,9 +46,30 @@ class Mirror(object):
         mygit.clone(*clone_args, kill_after_timeout=self.timeout)
         local_repo = git.Repo(self.repo_path)
 
+        if self.lfs:
+            local_repo.git.lfs("fetch", "--all", "origin")
+
         if self.shallow_clone:
             # Amend the last commit
             head_commit = local_repo.head.commit
+            
+            # Track large files with git lfs
+            for root, _, files in os.walk(self.repo_path):
+                if '.git' in root:
+                    continue
+                for filename in files:
+                    file_path = os.path.join(root, filename)
+                    if os.path.islink(file_path): # Skip symbolic links
+                        continue
+                    if os.path.getsize(file_path) > 100 * 1024 * 1024:  # 100MB
+                        # Remove large file from head_commit
+                        local_repo.index.remove([file_path])
+                        local_repo.index.commit(f"Remove large file {filename} from history and track with git lfs")
+                        local_repo.git.lfs("track", filename)
+                        print(f"Tracking large file with git lfs: {filename}")
+                        local_repo.git.add(file_path)
+                        local_repo.git.add(".gitattributes")
+                        local_repo.index.commit(f"Add large file {filename} back with git lfs tracking")
 
             # Create a new commit with the same tree and message as the old one
             local_repo.index.write()  # Ensure the index is written
@@ -65,8 +86,6 @@ class Mirror(object):
             local_repo.head.reset(index=True, working_tree=True)
             print(f"Amended commit: {new_commit.hexsha}")
 
-        if self.lfs:
-            local_repo.git.lfs("fetch", "--all", "origin")
         print("Clone completed: %s" % (os.getcwd() + self.repo_path))
 
     @retry(wait=wait_exponential(), reraise=True, stop=stop_after_attempt(3))
