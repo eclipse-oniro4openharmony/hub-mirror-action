@@ -5,7 +5,7 @@ import os
 import git
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from utils import cov2sec
+from utils import cov2sec, is_40_hex_chars, sanitize_branch_name
 
 
 class Mirror(object):
@@ -122,6 +122,37 @@ class Mirror(object):
         else:
             return True
 
+    def _sanitize_problematic_branches(self, local_repo):
+        """
+        Create sanitized local branches for any remote branches that have 40-hex-char names.
+        GitHub doesn't allow branch names that consist of 40 hexadecimal characters.
+        """
+        problematic_branches = []
+        
+        # Get all remote branches
+        for remote_ref in local_repo.remotes.origin.refs:
+            branch_name = remote_ref.name.split('/')[-1]  # Extract branch name from refs/remotes/origin/branch_name
+            
+            if is_40_hex_chars(branch_name):
+                sanitized_name = sanitize_branch_name(branch_name)
+                problematic_branches.append((branch_name, sanitized_name))
+                
+                print(f"Found problematic branch '{branch_name}', creating sanitized branch '{sanitized_name}'")
+                
+                # Create a local branch with the sanitized name pointing to the same commit
+                try:
+                    # Delete existing local branch if it exists
+                    if sanitized_name in [head.name for head in local_repo.heads]:
+                        local_repo.delete_head(sanitized_name, force=True)
+                    
+                    # Create new local branch
+                    new_branch = local_repo.create_head(sanitized_name, remote_ref.commit)
+                    print(f"Created local branch '{sanitized_name}' -> {remote_ref.commit.hexsha}")
+                except Exception as e:
+                    print(f"Warning: Failed to create sanitized branch '{sanitized_name}': {e}")
+        
+        return problematic_branches
+
     @retry(wait=wait_exponential(), reraise=True, stop=stop_after_attempt(3))
     def push(self, force=False):
         local_repo = git.Repo(self.repo_path)
@@ -138,23 +169,62 @@ class Mirror(object):
                 self.hub.dst_type, self.dst_url))
             local_repo.delete_remote(self.hub.dst_type)
             local_repo.create_remote(self.hub.dst_type, self.dst_url)
+        
         if self.branch:
+            # When pushing a specific branch, don't sanitize - push as-is
             cmd = [
-            self.hub.dst_type, f'{self.branch}'
+                self.hub.dst_type, f'{self.branch}'
             ]
         else:
-            cmd = [
-            self.hub.dst_type, 'refs/remotes/origin/*:refs/heads/*',
-            '--tags', '--prune'
-            ]
-        if not self.force_update:
-            print("(3/3) Pushing...")
-            local_repo.git.push(*cmd, kill_after_timeout=self.timeout)
-            if self.lfs:
-                git_cmd.lfs("push", self.hub.dst_type, "--all")
-        else:
-            print("(3/3) Force pushing...")
-            if self.lfs:
-                git_cmd.lfs("push", self.hub.dst_type, "--all")
-            cmd = ['-f'] + cmd
-            local_repo.git.push(*cmd, kill_after_timeout=self.timeout)
+            # Handle problematic branch names before pushing all branches
+            problematic_branches = self._sanitize_problematic_branches(local_repo)
+            
+            # Push all branches, but we need to handle problematic ones individually
+            cmd_args = []
+            
+            # First, push all non-problematic branches using the normal refspec
+            if not problematic_branches:
+                cmd_args = [
+                    self.hub.dst_type, 'refs/remotes/origin/*:refs/heads/*',
+                    '--tags', '--prune'
+                ]
+            else:
+                # Push normal branches first
+                normal_branches = []
+                for remote_ref in local_repo.remotes.origin.refs:
+                    branch_name = remote_ref.name.split('/')[-1]
+                    if not is_40_hex_chars(branch_name):
+                        normal_branches.append(f'refs/remotes/origin/{branch_name}:refs/heads/{branch_name}')
+                
+                if normal_branches:
+                    cmd_args = [self.hub.dst_type] + normal_branches + ['--tags', '--prune']
+                
+            cmd = cmd_args
+        
+        # Push normal branches or specific branch
+        if cmd and len(cmd) > 1:  # Make sure we have something to push
+            if not self.force_update:
+                print("(3/3) Pushing...")
+                local_repo.git.push(*cmd, kill_after_timeout=self.timeout)
+            else:
+                print("(3/3) Force pushing...")
+                cmd = ['-f'] + cmd
+                local_repo.git.push(*cmd, kill_after_timeout=self.timeout)
+        
+        # Only push sanitized branches when mirroring all branches (not when self.branch is specified)
+        if not self.branch:
+            problematic_branches = locals().get('problematic_branches', [])
+            for original_name, sanitized_name in problematic_branches:
+                print(f"Pushing sanitized branch '{sanitized_name}' (was '{original_name}')")
+                sanitized_cmd = [self.hub.dst_type, f'{sanitized_name}:{sanitized_name}']
+                if self.force_update:
+                    sanitized_cmd = ['-f'] + sanitized_cmd
+                try:
+                    local_repo.git.push(*sanitized_cmd, kill_after_timeout=self.timeout)
+                    print(f"Successfully pushed sanitized branch '{sanitized_name}'")
+                except git.exc.GitCommandError as e:
+                    print(f"Failed to push sanitized branch '{sanitized_name}': {e}")
+        
+        # Push LFS files if needed
+        if self.lfs:
+            git_cmd.lfs("push", self.hub.dst_type, "--all")

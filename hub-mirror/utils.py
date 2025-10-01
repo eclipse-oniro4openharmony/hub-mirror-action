@@ -47,3 +47,22 @@ def str2map(s):
         old, new = maping.split("=>")
         mappings[old] = new
     return mappings
+
+
+def is_40_hex_chars(branch_name):
+    """
+    Check if a branch name consists of exactly 40 hexadecimal characters.
+    GitHub doesn't allow such branch names as they look like Git SHA hashes.
+    """
+    import re
+    return len(branch_name) == 40 and bool(re.match(r'^[a-fA-F0-9]+$', branch_name))
+
+
+def sanitize_branch_name(branch_name):
+    """
+    Sanitize branch names that consist of 40 hex characters by adding a prefix.
+    This works around GitHub's restriction on SHA-like branch names.
+    """
+    if is_40_hex_chars(branch_name):
+        return f"branch-{branch_name}"
+    return branch_name
