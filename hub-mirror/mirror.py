@@ -47,7 +47,18 @@ class Mirror(object):
         local_repo = git.Repo(self.repo_path)
 
         if self.lfs:
-            local_repo.git.lfs("fetch", "--all", "origin")
+            print("Initializing Git LFS...")
+            try:
+                # Initialize LFS in the repository
+                local_repo.git.lfs("install")
+                # Fetch all LFS objects from origin
+                local_repo.git.lfs("fetch", "--all", "origin")
+                # Pull LFS objects for current HEAD
+                local_repo.git.lfs("pull")
+                print("Git LFS setup completed")
+            except git.exc.GitCommandError as e:
+                print(f"Warning: LFS setup failed: {e}")
+                # Continue without LFS - some repos might not have LFS setup properly
 
         if self.shallow_clone:
             # Amend the last commit
@@ -93,7 +104,13 @@ class Mirror(object):
         try:
             local_repo.git.pull(kill_after_timeout=self.timeout)
             if self.lfs:
-                local_repo.git.lfs("fetch", "--all", "origin")
+                print("Updating LFS objects...")
+                try:
+                    local_repo.git.lfs("fetch", "--all", "origin")
+                    local_repo.git.lfs("pull")
+                    print("LFS update completed")
+                except git.exc.GitCommandError as e:
+                    print(f"Warning: LFS update failed: {e}")
         except git.exc.GitCommandError:
             # Cleanup local repo and re-clone
             print('Updating failed, re-clone %s' % self.src_name)
@@ -170,6 +187,16 @@ class Mirror(object):
             local_repo.delete_remote(self.hub.dst_type)
             local_repo.create_remote(self.hub.dst_type, self.dst_url)
         
+        # Push LFS files BEFORE pushing branches to ensure LFS objects are available
+        if self.lfs:
+            print("Pushing LFS objects...")
+            try:
+                git_cmd.lfs("push", self.hub.dst_type, "--all")
+                print("LFS objects pushed successfully")
+            except git.exc.GitCommandError as e:
+                print(f"Warning: LFS push failed, will retry after branch push: {e}")
+                # Continue with branch push, we'll retry LFS push later
+        
         if self.branch:
             # When pushing a specific branch, don't sanitize - push as-is
             cmd = [
@@ -225,6 +252,19 @@ class Mirror(object):
                 except git.exc.GitCommandError as e:
                     print(f"Failed to push sanitized branch '{sanitized_name}': {e}")
         
-        # Push LFS files if needed
+        # Retry LFS push if it failed earlier or wasn't attempted
         if self.lfs:
-            git_cmd.lfs("push", self.hub.dst_type, "--all")
+            print("Ensuring all LFS objects are pushed...")
+            try:
+                git_cmd.lfs("push", self.hub.dst_type, "--all")
+                print("All LFS objects pushed successfully")
+            except git.exc.GitCommandError as e:
+                print(f"Final LFS push failed: {e}")
+                # Try alternative LFS push methods
+                try:
+                    print("Attempting LFS push with force...")
+                    git_cmd.lfs("push", "--force", self.hub.dst_type, "--all")
+                    print("Force LFS push successful")
+                except git.exc.GitCommandError as e2:
+                    print(f"Force LFS push also failed: {e2}")
+                    raise e  # Re-raise original exception
