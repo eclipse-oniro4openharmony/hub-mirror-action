@@ -28,6 +28,7 @@ class Mirror(object):
             self.timeout = 0
         self.force_update = force_update
         self.lfs = lfs
+        self.max_pack_size = 500 * 1024 * 1024  # 500MB chunk size
 
     @retry(wait=wait_exponential(), reraise=True, stop=stop_after_attempt(3))
     def _clone(self):
@@ -170,6 +171,130 @@ class Mirror(object):
         
         return problematic_branches
 
+    def _get_files_for_chunks(self, repo_path):
+        """
+        Group files into chunks based on size to avoid pack limit
+        """
+        file_chunks = []
+        current_chunk = []
+        current_chunk_size = 0
+        
+        # Walk through the directory to get all files
+        all_files = []
+        for root, dirs, files in os.walk(repo_path):
+            if '.git' in root:
+                continue
+            for filename in files:
+                filepath = os.path.join(root, filename)
+                if os.path.islink(filepath):
+                    continue
+                try:
+                    size = os.path.getsize(filepath)
+                    all_files.append((filepath, size))
+                except OSError:
+                    continue
+        
+        # Sort by size to handle smaller files first
+        all_files.sort(key=lambda x: x[1])
+        
+        for filepath, size in all_files:
+            rel_path = os.path.relpath(filepath, repo_path)
+            
+            # If a single file is larger than chunk size, it must be in its own chunk
+            # (or handled by LFS, but we are handling the non-LFS case here)
+            if size > self.max_pack_size:
+                if current_chunk:
+                    file_chunks.append(current_chunk)
+                    current_chunk = []
+                    current_chunk_size = 0
+                file_chunks.append([filepath])
+            elif current_chunk_size + size > self.max_pack_size:
+                file_chunks.append(current_chunk)
+                current_chunk = [filepath]
+                current_chunk_size = size
+            else:
+                current_chunk.append(filepath)
+                current_chunk_size += size
+                
+        if current_chunk:
+            file_chunks.append(current_chunk)
+            
+        return file_chunks
+
+    def _push_in_chunks(self, local_repo, remote_name, branch_ref):
+        """
+        Push large commit by splitting it into smaller chunks
+        """
+        print("Detailed push failed due to size limit. Attempting chunked push...")
+        
+        # Save current HEAD SHA and active branch
+        head_sha = local_repo.head.commit.hexsha
+        branch_name = branch_ref.split('/')[-1] if '/' in branch_ref else branch_ref
+        
+        try:
+            # Get chunks
+            chunks = self._get_files_for_chunks(self.repo_path)
+            total_chunks = len(chunks)
+            print(f"Split into {total_chunks} chunks.")
+
+            for i, chunk in enumerate(chunks, 1):
+                chunk_branch = f"temp_chunk_push_{i}"
+                print(f"Processing chunk {i}/{total_chunks} ({len(chunk)} files)...")
+                
+                # Cleanup if branch exists from previous run
+                if chunk_branch in [h.name for h in local_repo.heads]:
+                    local_repo.delete_head(chunk_branch, force=True)
+                
+                # Create orphan branch to start fresh (no parents)
+                # This ensures we only push the blobs in this chunk
+                local_repo.git.checkout("--orphan", chunk_branch)
+                
+                # Clear index but keep working tree
+                local_repo.git.rm("-rf", "--cached", ".", ignore_unmatch=True)
+
+                # Explicitly add .gitattributes first if it exists, to ensure LFS filters work
+                gitattributes_path = os.path.join(self.repo_path, ".gitattributes")
+                if os.path.exists(gitattributes_path):
+                    local_repo.git.add(gitattributes_path)
+                
+                # Add files for this chunk using git CLI to ensure LFS filters are respected
+                # chunk contains absolute paths
+                local_repo.git.add(*chunk)
+                
+                # Commit
+                commit_msg = f"Chunk {i}/{total_chunks} for {head_sha}"
+                local_repo.index.commit(commit_msg)
+                
+                # Push
+                print(f"Pushing chunk {i}/{total_chunks}...")
+                local_repo.git.push(remote_name, f"HEAD:{branch_name}", force=True)
+                
+            # Finally, we want to restore the original commit state exactly
+            print("Restoring original commit...")
+            
+            # Force reset local state back to original SHA
+            # We need to checkout the sha to detach or reset the current branch pointer
+            local_repo.git.checkout(head_sha, force=True)
+            
+            # And force push that SHA. Since remote has all blobs, this pushes only the Tree/Commit objects.
+            print("Force pushing final state...")
+            local_repo.git.push(remote_name, f"{head_sha}:{branch_name}", force=True)
+            print("Chunked push completed successfully.")
+            
+        except Exception as e:
+            print(f"Chunked push failed: {e}")
+            raise e
+        finally:
+            print("Cleaning up local state...")
+            try:
+                # Restore to original HEAD
+                local_repo.git.checkout(head_sha, force=True)
+                # Note: We leave the temp branches locally, or we could delete them.
+                # Git will garbage collect eventually or they get overwritten next run.
+            except:
+                pass
+
+
     @retry(wait=wait_exponential(), reraise=True, stop=stop_after_attempt(3))
     def push(self, force=False):
         local_repo = git.Repo(self.repo_path)
@@ -230,13 +355,26 @@ class Mirror(object):
         
         # Push normal branches or specific branch
         if cmd and len(cmd) > 1:  # Make sure we have something to push
-            if not self.force_update:
-                print("(3/3) Pushing...")
-                local_repo.git.push(*cmd, kill_after_timeout=self.timeout)
-            else:
-                print("(3/3) Force pushing...")
-                cmd = ['-f'] + cmd
-                local_repo.git.push(*cmd, kill_after_timeout=self.timeout)
+            try:
+                if not self.force_update:
+                    print("(3/3) Pushing...")
+                    local_repo.git.push(*cmd, kill_after_timeout=self.timeout)
+                else:
+                    print("(3/3) Force pushing...")
+                    cmd = ['-f'] + cmd
+                    local_repo.git.push(*cmd, kill_after_timeout=self.timeout)
+            except git.exc.GitCommandError as e:
+                # Check for pack size limit error
+                if "pack exceeds maximum allowed size" in str(e.stderr) and self.shallow_clone:
+                    # Parse the branch we were trying to push
+                    # If it's a specific branch push
+                    if self.branch:
+                        self._push_in_chunks(local_repo, self.hub.dst_type, self.branch)
+                    else:
+                        print("Warning: Large pack push failed but specific branch not set. Skipping chunked push attempt.")
+                        raise e
+                else:
+                    raise e
         
         # Only push sanitized branches when mirroring all branches (not when self.branch is specified)
         if not self.branch:
