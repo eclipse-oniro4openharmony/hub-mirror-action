@@ -31,6 +31,53 @@ class Mirror(object):
         self.max_pack_size = 500 * 1024 * 1024  # 500MB chunk size
 
     @retry(wait=wait_exponential(), reraise=True, stop=stop_after_attempt(3))
+    def _process_shallow_mirror(self, local_repo):
+        """
+        Process the repository for shallow mirroring:
+        1. Identify large files (>100MB) and track them with Git LFS
+        2. Flatten the history into a single commit
+        """
+        if not self.shallow_clone:
+            return
+
+        # Amend the last commit
+        head_commit = local_repo.head.commit
+        
+        # Track large files with git lfs
+        for root, _, files in os.walk(self.repo_path):
+            if '.git' in root:
+                continue
+            for filename in files:
+                file_path = os.path.join(root, filename)
+                if os.path.islink(file_path): # Skip symbolic links
+                    continue
+                # Check for files > 100MB
+                if os.path.getsize(file_path) > 100 * 1024 * 1024:
+                    # Remove large file from head_commit
+                    local_repo.index.remove([file_path])
+                    local_repo.index.commit(f"Remove large file {filename} from history and track with git lfs")
+                    local_repo.git.lfs("track", filename)
+                    print(f"Tracking large file with git lfs: {filename}")
+                    local_repo.git.add(file_path)
+                    local_repo.git.add(".gitattributes")
+                    local_repo.index.commit(f"Add large file {filename} back with git lfs tracking")
+
+        # Create a new commit with the same tree and message as the old one
+        local_repo.index.write()  # Ensure the index is written
+        new_commit = local_repo.index.commit(
+            head_commit.message,  # Use the same commit message
+            author=head_commit.author,
+            committer=head_commit.committer,
+            parent_commits=[],  # This makes it an initial commit
+            skip_hooks=True  # Skip pre-commit and post-commit hooks
+        )
+
+        # Force the HEAD reference to point to the new commit
+        local_repo.head.reference.set_commit(new_commit)
+        local_repo.head.reset(index=True, working_tree=True)
+        print(f"Amended commit: {new_commit.hexsha}")
+
+    @retry(wait=wait_exponential(), reraise=True, stop=stop_after_attempt(3))
     def _clone(self):
         # TODO: process empty repo
         print("Starting git clone " + self.src_url)
@@ -61,43 +108,7 @@ class Mirror(object):
                 print(f"Warning: LFS setup failed: {e}")
                 # Continue without LFS - some repos might not have LFS setup properly
 
-        if self.shallow_clone:
-            # Amend the last commit
-            head_commit = local_repo.head.commit
-            
-            # Track large files with git lfs
-            for root, _, files in os.walk(self.repo_path):
-                if '.git' in root:
-                    continue
-                for filename in files:
-                    file_path = os.path.join(root, filename)
-                    if os.path.islink(file_path): # Skip symbolic links
-                        continue
-                    if os.path.getsize(file_path) > 100 * 1024 * 1024:  # 100MB
-                        # Remove large file from head_commit
-                        local_repo.index.remove([file_path])
-                        local_repo.index.commit(f"Remove large file {filename} from history and track with git lfs")
-                        local_repo.git.lfs("track", filename)
-                        print(f"Tracking large file with git lfs: {filename}")
-                        local_repo.git.add(file_path)
-                        local_repo.git.add(".gitattributes")
-                        local_repo.index.commit(f"Add large file {filename} back with git lfs tracking")
-
-            # Create a new commit with the same tree and message as the old one
-            local_repo.index.write()  # Ensure the index is written
-            new_commit = local_repo.index.commit(
-                head_commit.message,  # Use the same commit message
-                author=head_commit.author,
-                committer=head_commit.committer,
-                parent_commits=[],  # This makes it an initial commit
-                skip_hooks=True  # Skip pre-commit and post-commit hooks
-            )
-
-            # Force the HEAD reference to point to the new commit
-            local_repo.head.reference.set_commit(new_commit)
-            local_repo.head.reset(index=True, working_tree=True)
-            print(f"Amended commit: {new_commit.hexsha}")
-
+        self._process_shallow_mirror(local_repo)
         print("Clone completed: %s" % (os.getcwd() + self.repo_path))
 
     @retry(wait=wait_exponential(), reraise=True, stop=stop_after_attempt(3))
@@ -112,6 +123,10 @@ class Mirror(object):
                     print("LFS update completed")
                 except git.exc.GitCommandError as e:
                     print(f"Warning: LFS update failed: {e}")
+            
+            # Re-process shallow mirror logic to catch new large files
+            self._process_shallow_mirror(local_repo)
+            
         except git.exc.GitCommandError:
             # Cleanup local repo and re-clone
             print('Updating failed, re-clone %s' % self.src_name)
