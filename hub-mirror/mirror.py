@@ -359,8 +359,16 @@ class Mirror(object):
                 # Push normal branches first
                 normal_branches = []
                 for remote_ref in local_repo.remotes.origin.refs:
-                    branch_name = remote_ref.name.split('/')[-1]
-                    if not is_40_hex_chars(branch_name):
+                    # Use remote_head so branch names containing '/' (e.g.
+                    # 'codex/foo') keep their full path. Using only the leaf
+                    # segment would build a src refspec like
+                    # 'refs/remotes/origin/foo' that does not match any local
+                    # ref ('refs/remotes/origin/codex/foo'), failing the push.
+                    branch_name = remote_ref.remote_head
+                    # 'origin/HEAD' is a symbolic ref, not a branch to mirror.
+                    if branch_name == 'HEAD':
+                        continue
+                    if not is_40_hex_chars(branch_name.split('/')[-1]):
                         normal_branches.append(f'refs/remotes/origin/{branch_name}:refs/heads/{branch_name}')
                 
                 if normal_branches:
