@@ -282,7 +282,7 @@ class Mirror(object):
                 
                 # Push
                 print(f"Pushing chunk {i}/{total_chunks}...")
-                local_repo.git.push(remote_name, f"HEAD:{branch_name}", force=True)
+                local_repo.git.push("--no-verify", remote_name, f"HEAD:{branch_name}", force=True)
                 
             # Finally, we want to restore the original commit state exactly
             print("Restoring original commit...")
@@ -293,7 +293,7 @@ class Mirror(object):
             
             # And force push that SHA. Since remote has all blobs, this pushes only the Tree/Commit objects.
             print("Force pushing final state...")
-            local_repo.git.push(remote_name, f"{head_sha}:{branch_name}", force=True)
+            local_repo.git.push("--no-verify", remote_name, f"{head_sha}:{branch_name}", force=True)
             print("Chunked push completed successfully.")
             
         except Exception as e:
@@ -379,13 +379,21 @@ class Mirror(object):
         # Push normal branches or specific branch
         if cmd and len(cmd) > 1:  # Make sure we have something to push
             try:
+                # --no-verify skips git's pre-push hook. Because `git lfs install`
+                # runs in the entrypoint, that hook is `git lfs pre-push`, which
+                # re-scans LFS objects and verifies locks against the GitHub LFS
+                # API. LFS objects are already pushed explicitly via
+                # `git lfs push --all` (before and after this), so the hook is
+                # redundant here, and its lock verification fails for the
+                # mirror's SSH credentials ("Authentication required: You must
+                # have push access to verify locks"), breaking valid pushes.
                 if not self.force_update:
                     print("(3/3) Pushing...")
-                    local_repo.git.push(*cmd, kill_after_timeout=self.timeout)
+                    local_repo.git.push("--no-verify", *cmd, kill_after_timeout=self.timeout)
                 else:
                     print("(3/3) Force pushing...")
                     cmd = ['-f'] + cmd
-                    local_repo.git.push(*cmd, kill_after_timeout=self.timeout)
+                    local_repo.git.push("--no-verify", *cmd, kill_after_timeout=self.timeout)
             except git.exc.GitCommandError as e:
                 # Check for pack size limit error
                 if "pack exceeds maximum allowed size" in str(e.stderr) and self.shallow_clone:
@@ -408,7 +416,8 @@ class Mirror(object):
                 if self.force_update:
                     sanitized_cmd = ['-f'] + sanitized_cmd
                 try:
-                    local_repo.git.push(*sanitized_cmd, kill_after_timeout=self.timeout)
+                    # --no-verify: skip the redundant git-lfs pre-push hook (see note above).
+                    local_repo.git.push("--no-verify", *sanitized_cmd, kill_after_timeout=self.timeout)
                     print(f"Successfully pushed sanitized branch '{sanitized_name}'")
                 except git.exc.GitCommandError as e:
                     print(f"Failed to push sanitized branch '{sanitized_name}': {e}")
